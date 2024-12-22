@@ -3,3 +3,4 @@ numpy
 ultralytics
 PyQt5
 qtawesome
+deep-sort-realtimex

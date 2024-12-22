@@ -3,7 +3,7 @@ import numpy as np
 from ultralytics import YOLO
 
 class YOLOv8Detector:
-    def __init__(self, weights_path, conf_thres=0.4, iou_thres=0.5):
+    def __init__(self, weights_path, conf_thres=0.55, iou_thres=0.5):
         self.model = YOLO(weights_path)
         self.conf_thres = conf_thres
         self.iou_thres = iou_thres
