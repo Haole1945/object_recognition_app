@@ -1,7 +1,10 @@
 import cv2
 import time
 import numpy as np
-from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QSize
+import os
+import re
+import mysql.connector
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QSize
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
     QMainWindow,
@@ -14,6 +17,8 @@ from PyQt5.QtWidgets import (
     QSlider,
     QSizePolicy,
     QProgressBar,
+    QTableWidget,
+    QTableWidgetItem,
 )
 from utils.detectors import YOLOv8Detector
 from utils.utils import draw_detections
@@ -63,9 +68,7 @@ class VideoThread(QThread):
                                 )
                             )
                         # Update tracker with detections
-                        tracks = self.tracker.update_tracks(
-                            detections, frame=frame
-                        )  # bbs expected to be a list of আহমেদ, each item being a list with [x1, y1, x2, y2, track_id]
+                        tracks = self.tracker.update_tracks(detections, frame=frame)
 
                         # Extract bounding boxes, scores, class IDs, and object IDs from tracks
                         updated_boxes = []
@@ -95,7 +98,7 @@ class VideoThread(QThread):
                             if class_id is None:
                                 class_id = 0  # Gán class_id mặc định là 0 nếu không lấy được từ track
 
-                            updated_class_ids.append(class_id)  # Sửa lại thành class_id thay vì gán cứng là 0
+                            updated_class_ids.append(class_id)
                             updated_object_ids.append(track_id)
 
                         self.detection_results_signal.emit(
@@ -138,61 +141,60 @@ class MainWindow(QMainWindow):
         self.video_thread = None
         self.video_path = None
 
+        # Database config
+        self.db_config = {
+            "host": "localhost",
+            "user": "root",
+            "password": "161003",
+            "database": "exportedData",
+        }
+        self.db_connection = None
+        self.db_cursor = None
+        self.current_table_name = None
+        self.processed_ids = set()  # Set để lưu trữ các ID đã được xử lý
+
         # UI elements
         self.central_widget = QWidget()
         self.setCentralWidget(self.central_widget)
 
-        self.main_layout = QHBoxLayout(self.central_widget) # Change to QHBoxLayout
+        self.main_layout = QHBoxLayout(self.central_widget)
         self.main_layout.setContentsMargins(10, 10, 10, 10)
         self.main_layout.setSpacing(10)
 
+        # Left Layout
         self.left_layout = QVBoxLayout()
-        self.right_layout = QVBoxLayout()
 
         self.video_label = QLabel("No video loaded")
         self.video_label.setAlignment(Qt.AlignCenter)
-        self.video_label.setFixedSize(640, 480)  # Set fixed size
+        self.video_label.setFixedSize(640, 480)
         self.left_layout.addWidget(self.video_label)
-
-        self.processed_video_label = QLabel("Processed video") # New label for processed video
-        self.processed_video_label.setAlignment(Qt.AlignCenter)
-        self.processed_video_label.setFixedSize(640, 480)  # Set fixed size
-        self.right_layout.addWidget(self.processed_video_label)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding)
-        self.right_layout.addWidget(spacer)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
         self.left_layout.addWidget(self.progress_bar)
 
-        spacer = QWidget()
-        spacer.setFixedWidth(20)  # Đặt khoảng cách ngang cố định giữa hai video
-        self.main_layout.addWidget(spacer)
-
+        # Control Layout (chứa 4 nút)
         self.control_layout = QHBoxLayout()
         self.control_layout.setContentsMargins(0, 0, 0, 0)
         self.control_layout.setSpacing(10)
 
-        self.open_button = QPushButton(qta.icon('fa5s.folder-open'), "Open Video")
+        self.open_button = QPushButton(qta.icon("fa5s.folder-open"), "Open Video")
         self.open_button.setIconSize(QSize(24, 24))
         self.open_button.clicked.connect(self.open_file)
         self.control_layout.addWidget(self.open_button)
 
-        self.webcam_button = QPushButton(qta.icon('fa5s.camera'), "Open Webcam")
+        self.webcam_button = QPushButton(qta.icon("fa5s.camera"), "Open Webcam")
         self.webcam_button.setIconSize(QSize(24, 24))
         self.webcam_button.clicked.connect(self.open_webcam)
         self.control_layout.addWidget(self.webcam_button)
 
-        self.play_button = QPushButton(qta.icon('fa5s.play'), "Play/Pause")
+        self.play_button = QPushButton(qta.icon("fa5s.play"), "Play/Pause")
         self.play_button.setIconSize(QSize(24, 24))
-
         self.play_button.setEnabled(False)
         self.play_button.clicked.connect(self.play_video)
         self.control_layout.addWidget(self.play_button)
 
-        self.stop_button = QPushButton(qta.icon('fa5s.stop'), "Stop")
+        self.stop_button = QPushButton(qta.icon("fa5s.stop"), "Stop")
         self.stop_button.setIconSize(QSize(24, 24))
         self.stop_button.setEnabled(False)
         self.stop_button.clicked.connect(self.stop_video)
@@ -200,18 +202,47 @@ class MainWindow(QMainWindow):
 
         self.left_layout.addLayout(self.control_layout)
 
-        # Confidence threshold slider
+        # Thêm một spacer để tạo khoảng cách giữa control_layout và conf_layout
+        spacer_widget = QWidget()
+        spacer_widget.setSizePolicy(QSizePolicy.Minimum, QSizePolicy.Fixed)
+        spacer_widget.setFixedHeight(30)  # Điều chỉnh khoảng cách ở đây
+        self.left_layout.addWidget(spacer_widget)
+
+        # Confidence threshold slider (conf_layout)
         self.conf_layout = QHBoxLayout()
         self.conf_label = QLabel("Confidence Threshold:")
         self.conf_layout.addWidget(self.conf_label)
+
         self.conf_slider = QSlider(Qt.Horizontal)
         self.conf_slider.setRange(0, 100)
         self.conf_slider.setValue(55)  # Default value
         self.conf_slider.valueChanged.connect(self.update_confidence_threshold)
         self.conf_layout.addWidget(self.conf_slider)
+
         self.conf_value_label = QLabel("0.55")
         self.conf_layout.addWidget(self.conf_value_label)
+
+        # Thêm conf_layout vào left_layout
         self.left_layout.addLayout(self.conf_layout)
+
+        # Thêm một expanding spacer phía dưới conf_layout để đẩy nó lên trên
+        self.left_layout.addStretch()
+
+        # Right Layout
+        self.right_layout = QVBoxLayout()
+
+        self.processed_video_label = QLabel("Processed video")
+        self.processed_video_label.setAlignment(Qt.AlignCenter)
+        self.processed_video_label.setFixedSize(640, 480)
+        self.right_layout.addWidget(self.processed_video_label)
+
+        # Thêm QTableWidget vào right_layout
+        self.table_widget = QTableWidget()
+        self.table_widget.setColumnCount(3)
+        self.table_widget.setHorizontalHeaderLabels(["ID", "Loại Xe", "Độ Tin Cậy"])
+        self.table_widget.horizontalHeader().setStretchLastSection(True)
+        self.table_widget.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.right_layout.addWidget(self.table_widget)
 
         # Add left and right layouts to the main layout
         self.main_layout.addLayout(self.left_layout)
@@ -222,9 +253,58 @@ class MainWindow(QMainWindow):
         self.new_frame_time = 0
         self.last_fps_update_time = time.time()  # time of last update FPS
 
+    def connect_to_db(self):
+        try:
+            self.db_connection = mysql.connector.connect(**self.db_config)
+            self.db_cursor = self.db_connection.cursor()
+            print("Connected to database successfully!")
+        except mysql.connector.Error as err:
+            print(f"Error connecting to database: {err}")
+
+    def create_table(self, table_name):
+        try:
+            # Sử dụng IF NOT EXISTS để tránh lỗi nếu bảng đã tồn tại
+            self.db_cursor.execute(
+                f"""
+                CREATE TABLE IF NOT EXISTS {table_name} (
+                    id INT PRIMARY KEY,
+                    class_name VARCHAR(255),
+                    confidence FLOAT
+                )
+                """
+            )
+            self.db_connection.commit()
+            print(f"Table {table_name} created or already exists.")
+
+            # Nếu bảng đã tồn tại, xóa dữ liệu cũ
+            self.db_cursor.execute(f"DELETE FROM {table_name}")
+            self.db_connection.commit()
+            print(f"Data cleared from existing table {table_name}.")
+
+        except mysql.connector.Error as err:
+            print(f"Error creating or clearing table {table_name}: {err}")
+
+    def insert_data(self, table_name, id_num, class_name, confidence):
+        if id_num not in self.processed_ids:
+            try:
+                sql = f"INSERT INTO {table_name} (id, class_name, confidence) VALUES (%s, %s, %s)"
+                val = (id_num, class_name, confidence)
+                self.db_cursor.execute(sql, val)
+                self.db_connection.commit()
+                self.processed_ids.add(id_num)  # Thêm ID vào set đã xử lý
+                print(
+                    f"Data inserted: ID={id_num}, Class={class_name}, Confidence={confidence}"
+                )
+            except mysql.connector.Error as err:
+                print(f"Error inserting data: {err}")
+
     def open_file(self):
-        file_name, _ = QFileDialog.getOpenFileName(self, "Open Video File", "",
-                                                   "Videos (*.mp4 *.avi *.mov);;All Files (*)")
+        file_name, _ = QFileDialog.getOpenFileName(
+            self,
+            "Open Video File",
+            "",
+            "Videos (*.mp4 *.avi *.mov);;All Files (*)",
+        )
         if file_name:
             self.progress_bar.setVisible(True)
             self.progress_bar.setRange(0, 0)  # Indeterminate
@@ -239,13 +319,32 @@ class MainWindow(QMainWindow):
         if self.video_thread is not None:
             self.video_thread.stop()
 
+        # Kết nối database
+        self.connect_to_db()
+
+        # Lấy tên file (không có phần mở rộng) và tạo tên bảng
+        if video_path == 0:  # Xử lý trường hợp webcam
+            file_name = "webcam"
+            self.current_table_name = "ExpDataFromWebcam"
+        else: # Trường hợp video_path là đường dẫn file
+            file_name = os.path.splitext(os.path.basename(video_path))[0]
+            self.current_table_name = (
+                "ExpDataFrom" + re.sub(r"[^a-zA-Z0-9]", "", file_name).capitalize()
+            )
+
+        # Tạo bảng mới (nếu chưa tồn tại)
+        self.create_table(self.current_table_name)
+
+        # Reset processed_ids
+        self.processed_ids.clear()
+
         self.video_thread = VideoThread(self.detector, video_path)
         self.video_thread.change_pixmap_signal.connect(self.update_image)
         self.video_thread.detection_results_signal.connect(self.draw_results)
         self.video_thread.start()
         self.play_button.setEnabled(True)
         self.stop_button.setEnabled(True)
-        self.play_button.setIcon(qta.icon('fa5s.pause'))
+        self.play_button.setIcon(qta.icon("fa5s.pause"))
 
     def play_video(self):
         if self.video_thread is not None:
@@ -297,7 +396,7 @@ class MainWindow(QMainWindow):
                     "motorcycle",
                     "bicycle",
                 ],
-                conf_thres=self.detector.conf_thres
+                conf_thres=self.detector.conf_thres,
             )
 
             # Convert back to QImage and update the label
@@ -309,6 +408,133 @@ class MainWindow(QMainWindow):
             )
 
             self.processed_video_label.setPixmap(scaled_pixmap)
+
+            # Lọc các đối tượng có độ tin cậy cao hơn ngưỡng
+            filtered_indices = [
+                i
+                for i, score in enumerate(scores)
+                if score >= self.detector.conf_thres
+            ]
+            filtered_ids = [ids[i] for i in filtered_indices]
+            filtered_class_ids = [class_ids[i] for i in filtered_indices]
+            filtered_scores = [scores[i] for i in filtered_indices]
+
+            # Cập nhật bảng
+            self.table_widget.setRowCount(len(filtered_ids))
+            for i, (id_num, class_id, score) in enumerate(
+                zip(filtered_ids, filtered_class_ids, filtered_scores)
+            ):
+                class_name = self.get_class_name(class_id)
+                self.table_widget.setItem(i, 0, QTableWidgetItem(str(id_num)))
+                self.table_widget.setItem(i, 1, QTableWidgetItem(class_name))
+                self.table_widget.setItem(
+                    i, 2, QTableWidgetItem(f"{score:.2f}")
+                )
+
+                # Thêm dữ liệu vào database
+                if (
+                    self.db_connection is not None
+                    and self.current_table_name is not None
+                ):
+                    self.insert_data(
+                        self.current_table_name, id_num, class_name, score
+                    )
+
+    def get_class_name(self, class_id):
+        # Dictionary ánh xạ class_id sang tên class (COCO dataset)
+        class_names = {
+            0: "person",
+            1: "bicycle",
+            2: "car",
+            3: "motorcycle",
+            4: "airplane",
+            5: "bus",
+            6: "train",
+            7: "truck",
+            8: "boat",
+            9: "traffic light",
+            10: "fire hydrant",
+            11: "stop sign",
+            12: "parking meter",
+            13: "bench",
+            14: "bird",
+            15: "cat",
+            16: "dog",
+            17: "horse",
+            18: "sheep",
+            19: "cow",
+            20: "elephant",
+            21: "bear",
+            22: "zebra",
+            23: "giraffe",
+            24: "backpack",
+            25: "umbrella",
+            26: "handbag",
+            27: "tie",
+            28: "suitcase",
+            29: "frisbee",
+            30: "skis",
+            31: "snowboard",
+            32: "sports ball",
+            33: "kite",
+            34: "baseball bat",
+            35: "baseball glove",
+            36: "skateboard",
+            37: "surfboard",
+            38: "tennis racket",
+            39: "bottle",
+            40: "wine glass",
+            41: "cup",
+            42: "fork",
+            43: "knife",
+            44: "spoon",
+            45: "bowl",
+            46: "banana",
+            47: "apple",
+            48: "sandwich",
+            49: "orange",
+            50: "broccoli",
+            51: "carrot",
+            52: "hot dog",
+            53: "pizza",
+            54: "donut",
+            55: "cake",
+            56: "chair",
+            57: "couch",
+            58: "potted plant",
+            59: "bed",
+            60: "dining table",
+            61: "toilet",
+            62: "tv",
+            63: "laptop",
+            64: "mouse",
+            65: "remote",
+            66: "keyboard",
+            67: "cell phone",
+            68: "microwave",
+            69: "oven",
+            70: "toaster",
+            71: "sink",
+            72: "refrigerator",
+            73: "book",
+            74: "clock",
+            75: "vase",
+            76: "scissors",
+            77: "teddy bear",
+            78: "hair drier",
+            79: "toothbrush",
+        }
+        allowed_classes = [
+            "person",
+            "car",
+            "truck",
+            "bus",
+            "motorcycle",
+            "bicycle",
+        ]
+        # Trả về tên class nếu nằm trong allowed_classes, ngược lại trả về chuỗi rỗng
+        class_name = class_names.get(class_id, "")
+        return class_name if class_name in allowed_classes else ""
 
     def convert_cv_qt(self, cv_img):
         """Convert from an opencv image to QPixmap"""
@@ -366,4 +592,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         if self.video_thread is not None:
             self.video_thread.stop()
+
+        # Đóng kết nối database
+        if self.db_connection is not None and self.db_connection.is_connected():
+            self.db_cursor.close()
+            self.db_connection.close()
+            print("Database connection closed.")
         event.accept()

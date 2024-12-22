@@ -3,4 +3,5 @@ numpy
 ultralytics
 PyQt5
 qtawesome
-deep-sort-realtimex
+deep-sort-realtime
+mysql-connector-python

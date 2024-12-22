@@ -104,7 +104,7 @@ def draw_detections(img, boxes, scores, class_ids, ids, mask_alpha=0.3, allowed_
         x1, y1, x2, y2 = map(int, box)
         if x1 < 0 or y1 < 0 or x2 > img.shape[1] or y2 > img.shape[0]:
             print(f"Bounding box {box} vượt giới hạn ảnh {img.shape[:2]}")
-            continue  # Bỏ qua bounding box không hợp lệ
+            continue 
         cv2.rectangle(img, (x1, y1), (x2, y2), color, 2)
 
         # Hiển thị nhãn
